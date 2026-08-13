@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Environment files — NEVER push these
+.env
+.env.local
+backend/.env
+frontend/.env
+*.env
+
+# Uploads
+backend/uploads/
+
+# Node
+node_modules/
+dist/
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
