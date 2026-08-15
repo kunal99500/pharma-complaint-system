@@ -13,6 +13,7 @@ app = FastAPI(
     title="AIVOA Pharma Complaint Management System",
     description="AI-powered customer complaint management for pharmaceutical QMS",
     version="1.0.0",
+    redirect_slashes=False,
 )
 
 app.add_middleware(
