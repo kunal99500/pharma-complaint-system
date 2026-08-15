@@ -1,11 +1,18 @@
 import os
 import uuid
+from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import Complaint, Attachment
+from models import (
+    Attachment,
+    Complaint,
+    ComplaintCategory,
+    ComplaintStatus,
+    RiskLevel,
+)
 from schemas import (
     ComplaintCreate,
     ComplaintListItem,
@@ -55,12 +62,10 @@ def extract_file_text(
             from pypdf import PdfReader
 
             reader = PdfReader(file_path)
-
             text = []
 
             for page in reader.pages:
                 page_text = page.extract_text()
-
                 if page_text:
                     text.append(page_text)
 
@@ -70,14 +75,8 @@ def extract_file_text(
             return ""
 
     try:
-        with open(
-            file_path,
-            "r",
-            encoding="utf-8",
-            errors="ignore",
-        ) as file:
-            return file.read()
-
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
     except Exception:
         return ""
 
@@ -94,23 +93,19 @@ def create_complaint(
         complaint_number=generate_complaint_number(),
         source_type=complaint_data.source_type,
         raw_input=complaint_data.raw_input,
-
         customer_name=complaint_data.customer_name,
         customer_email=complaint_data.customer_email,
         customer_phone=complaint_data.customer_phone,
         customer_company=complaint_data.customer_company,
         customer_country=complaint_data.customer_country,
-
         product_name=complaint_data.product_name,
         batch_number=complaint_data.batch_number,
         manufacturing_date=complaint_data.manufacturing_date,
         expiry_date=complaint_data.expiry_date,
         quantity_affected=complaint_data.quantity_affected,
-
         complaint_description=complaint_data.complaint_description,
         date_of_complaint=complaint_data.date_of_complaint,
         category=complaint_data.category,
-
         storage_conditions=complaint_data.storage_conditions,
         actions_taken=complaint_data.actions_taken,
         coa_information=complaint_data.coa_information,
@@ -138,9 +133,7 @@ async def upload_complaint(
             detail="Filename is required",
         )
 
-    extension = os.path.splitext(
-        file.filename
-    )[1].lower()
+    extension = os.path.splitext(file.filename)[1].lower()
 
     allowed_extensions = {
         ".pdf": "pdf",
@@ -155,25 +148,15 @@ async def upload_complaint(
         )
 
     file_type = allowed_extensions[extension]
-
-    unique_filename = (
-        f"{uuid.uuid4().hex}{extension}"
-    )
-
-    file_path = os.path.join(
-        UPLOAD_DIR,
-        unique_filename,
-    )
+    unique_filename = f"{uuid.uuid4().hex}{extension}"
+    file_path = os.path.join(UPLOAD_DIR, unique_filename)
 
     contents = await file.read()
 
     with open(file_path, "wb") as saved_file:
         saved_file.write(contents)
 
-    extracted_text = extract_file_text(
-        file_path,
-        file_type,
-    )
+    extracted_text = extract_file_text(file_path, file_type)
 
     if not extracted_text.strip():
         raise HTTPException(
@@ -211,11 +194,33 @@ async def upload_complaint(
     response_model=list[ComplaintListItem],
 )
 def list_complaints(
+    status: Optional[ComplaintStatus] = Query(default=None),
+    risk_level: Optional[RiskLevel] = Query(default=None),
+    category: Optional[ComplaintCategory] = Query(default=None),
+    ai_processed: Optional[bool] = Query(default=None),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db),
 ):
+    query = db.query(Complaint)
+
+    if status is not None:
+        query = query.filter(Complaint.status == status)
+
+    if risk_level is not None:
+        query = query.filter(Complaint.risk_level == risk_level)
+
+    if category is not None:
+        query = query.filter(Complaint.category == category)
+
+    if ai_processed is not None:
+        query = query.filter(Complaint.ai_processed == ai_processed)
+
     complaints = (
-        db.query(Complaint)
+        query
         .order_by(Complaint.created_at.desc())
+        .offset(skip)
+        .limit(limit)
         .all()
     )
 
@@ -230,10 +235,7 @@ def get_complaint(
     complaint_id: str,
     db: Session = Depends(get_db),
 ):
-    return get_complaint_or_404(
-        complaint_id,
-        db,
-    )
+    return get_complaint_or_404(complaint_id, db)
 
 
 @router.patch(
@@ -245,21 +247,12 @@ def update_complaint(
     complaint_data: ComplaintUpdate,
     db: Session = Depends(get_db),
 ):
-    complaint = get_complaint_or_404(
-        complaint_id,
-        db,
-    )
+    complaint = get_complaint_or_404(complaint_id, db)
 
-    update_data = complaint_data.model_dump(
-        exclude_unset=True
-    )
+    update_data = complaint_data.model_dump(exclude_unset=True)
 
     for field, value in update_data.items():
-        setattr(
-            complaint,
-            field,
-            value,
-        )
+        setattr(complaint, field, value)
 
     db.commit()
     db.refresh(complaint)
@@ -267,17 +260,12 @@ def update_complaint(
     return complaint
 
 
-@router.delete(
-    "/{complaint_id}",
-)
+@router.delete("/{complaint_id}")
 def delete_complaint(
     complaint_id: str,
     db: Session = Depends(get_db),
 ):
-    complaint = get_complaint_or_404(
-        complaint_id,
-        db,
-    )
+    complaint = get_complaint_or_404(complaint_id, db)
 
     db.delete(complaint)
     db.commit()

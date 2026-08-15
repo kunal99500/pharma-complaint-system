@@ -22,6 +22,8 @@
 
 A full-stack AI-powered Quality Management System (QMS) for pharmaceutical manufacturers to log, analyze, and manage customer complaints. The system uses a LangGraph AI agent with OpenAI to automatically extract complaint information, classify risk levels per ICH Q10 and FDA 21 CFR Part 211, perform root cause analysis, generate CAPA recommendations, and detect duplicate complaints — all from a single complaint text or uploaded document.
 
+Analysis runs as a **background task** — the API returns immediately and the frontend polls for results, keeping the system responsive even during long LLM processing.
+
 ---
 
 ## Tech Stack
@@ -35,8 +37,7 @@ A full-stack AI-powered Quality Management System (QMS) for pharmaceutical manuf
 | AI Agent | LangGraph |
 | LLM | OpenAI API (gpt-4o-mini) |
 | Validation | Pydantic |
-| Migrations | Alembic |
-| Document Parsing | PyPDF2, pytesseract, Pillow |
+| Document Parsing | PyPDF2 |
 
 ### Frontend
 | Layer | Technology |
@@ -60,17 +61,17 @@ pharma-complaint-system/
 │
 ├── backend/
 │   ├── agents/
-│   │   ├── nodes.py               # All 7 LangGraph node functions
-│   │   ├── prompts.py             # LLM prompt templates
-│   │   ├── state.py               # ComplaintAgentState TypedDict
-│   │   └── complaint_agent.py     # LangGraph graph definition
+│   │   ├── nodes.py               # 4 LangGraph nodes — each makes a real LLM call
+│   │   ├── prompts.py             # 4 focused prompt templates (one per node)
+│   │   ├── state.py               # ComplaintAgentState TypedDict + success flags
+│   │   └── complaint_agent.py     # LangGraph graph definition + runner
 │   │
 │   ├── core/
 │   │   └── config.py              # Pydantic settings — loads from .env
 │   │
 │   ├── routers/
-│   │   ├── complaints.py          # CRUD endpoints for complaints
-│   │   └── analysis.py            # AI analysis trigger endpoint
+│   │   ├── complaints.py          # CRUD endpoints — pagination + filtering
+│   │   └── analysis.py            # AI analysis — background task + status polling
 │   │
 │   ├── models.py                  # SQLAlchemy ORM models (4 tables)
 │   ├── schemas.py                 # Pydantic request/response schemas
@@ -87,117 +88,162 @@ pharma-complaint-system/
     │   │
     │   ├── components/
     │   │   ├── AICopilot.jsx      # AI results panel (risk, CAPA, root cause)
-    │   │   ├── AICopilot/
-    │   │   │   └── AICopilotPanel.jsx
     │   │   ├── ComplaintForm.jsx  # Main form + chat interface
     │   │   ├── ComplaintList.jsx  # Filterable complaint table
     │   │   └── Layout/
-    │   │       ├── Header.jsx     # Top navigation bar
-    │   │       ├── Layout.jsx     # Page layout wrapper
-    │   │       └── Sidebar.jsx    # Sidebar navigation
+    │   │       ├── Header.jsx
+    │   │       ├── Layout.jsx
+    │   │       └── Sidebar.jsx
     │   │
     │   ├── pages/
-    │   │   ├── Dashboard.jsx          # KPI overview + recent complaints
-    │   │   ├── DashboardPage.jsx      # Dashboard page wrapper
-    │   │   ├── ComplaintFormPage.jsx  # Log/edit complaint page
-    │   │   └── ComplaintsListPage.jsx # Complaints list page
-    │   │
-    │   ├── services/
-    │   │   └── api.js             # Axios instance + interceptors
+    │   │   ├── Dashboard.jsx
+    │   │   ├── ComplaintFormPage.jsx
+    │   │   └── ComplaintsListPage.jsx
     │   │
     │   ├── store/
-    │   │   ├── store.js           # Redux store configuration
-    │   │   ├── index.js           # Store exports
-    │   │   ├── complaintsSlice.js # Main complaint state + thunks
-    │   │   ├── complaintSlice.js  # Single complaint state
-    │   │   └── complaintsListSlice.js # Complaint list state
+    │   │   ├── store.js
+    │   │   ├── complaintsSlice.js
+    │   │   ├── complaintSlice.js
+    │   │   └── complaintsListSlice.js
     │   │
-    │   ├── styles/
-    │   │   └── globals.css        # Global styles
-    │   │
-    │   ├── App.jsx                # Root component + routes
-    │   ├── main.jsx               # React entry point + Redux Provider
-    │   └── index.css              # Tailwind CSS imports + Inter font
+    │   ├── App.jsx
+    │   └── main.jsx
     │
-    ├── index.html                 # HTML entry point
-    ├── vite.config.js             # Vite build configuration
-    ├── tailwind.config.js         # Tailwind configuration
-    ├── postcss.config.js          # PostCSS configuration
-    └── package.json               # Node dependencies
+    ├── index.html
+    ├── vite.config.js
+    ├── tailwind.config.js
+    └── package.json
 ```
 
 ---
 
 ## AI Pipeline
 
-The LangGraph agent runs a 7-node directed graph. All 7 tasks are performed in a **single OpenAI API call** to avoid rate limits and minimize latency. Each node then reads its slice of the result from shared state.
+The LangGraph agent runs **4 nodes**, each making its own focused OpenAI API call. Every node receives the output of the previous node as structured input — so each step builds on real, grounded data rather than re-parsing raw text.
 
 ```
 User Input (text / PDF / email)
             ↓
     ┌── Node 1: EXTRACT ──────────────────────────────────┐
-    │   Single OpenAI gpt-4o-mini call                    │
-    │   Extracts: product, batch, customer, description   │
-    │   Also performs: classification, completeness,      │
-    │   root cause, CAPA, summary, duplicate detection    │
-    │   Stores full result in _full_analysis state key    │
+    │   Focused prompt — extraction only                  │
+    │   Input:  raw complaint text                        │
+    │   Output: structured JSON of all complaint fields   │
+    │           customer, product, batch, dates, etc.     │
+    │           Sets extraction_success flag              │
     └─────────────────────────────────────────────────────┘
-            ↓
-    Node 2: CLASSIFY        reads _full_analysis → risk_level, category
-            ↓
-    Node 3: COMPLETENESS    reads _full_analysis → is_complete, missing_fields
-            ↓
-    Node 4: ROOT CAUSE      reads _full_analysis → root_cause_analysis, probable_causes
-            ↓
-    Node 5: CAPA            reads _full_analysis → capa_actions (corrective + preventive)
-            ↓
-    Node 6: SUMMARIZE       reads _full_analysis → ai_summary
-            ↓
-    Node 7: DUPLICATES      reads _full_analysis → duplicate_score, similar_ids
+            ↓ (passes extracted JSON as input)
+    ┌── Node 2: CLASSIFY + ROOT CAUSE ────────────────────┐
+    │   Focused prompt — classification only              │
+    │   Input:  extracted fields from Node 1              │
+    │   Output: risk_level, complaint_category,           │
+    │           classification_reasoning,                 │
+    │           regulatory_reference,                     │
+    │           is_complete, missing_fields,              │
+    │           root_cause_analysis, probable_causes      │
+    │           Sets classification_success flag          │
+    └─────────────────────────────────────────────────────┘
+            ↓ (passes classification + root cause as input)
+    ┌── Node 3: CAPA + SUMMARY ───────────────────────────┐
+    │   Focused prompt — CAPA generation only             │
+    │   Input:  classification + root cause from Node 2   │
+    │   Output: corrective and preventive CAPA actions,   │
+    │           professional ai_summary for quality record│
+    │           Sets capa_success flag                    │
+    └─────────────────────────────────────────────────────┘
+            ↓ (passes extracted fields as input)
+    ┌── Node 4: DUPLICATE DETECTION ──────────────────────┐
+    │   Focused prompt — comparison only                  │
+    │   Input:  extracted fields + all existing complaints│
+    │   Output: duplicate_score (0.0–1.0),                │
+    │           similar_complaint_ids                     │
+    └─────────────────────────────────────────────────────┘
             ↓
            END
 ```
 
-**Risk Classification** follows ICH Q10, FDA 21 CFR Part 211 standards:
+### Why 4 separate LLM calls?
+
+| Single mega-prompt | 4 focused prompts |
+|-------------------|------------------|
+| One prompt doing 7 tasks at once | Each prompt does exactly one task |
+| LLM attention split across all tasks | Full LLM attention on each task |
+| One failure crashes everything | Node failures are isolated — partial results saved |
+| Cannot use extraction output to ground classification | Classification receives clean structured JSON as input |
+| Harder to debug and improve | Each prompt can be tuned independently |
+
+### Retry Logic
+
+Every node retries up to 3 times with exponential backoff (1s → 2s → 4s) before failing. If a node fails, downstream nodes skip gracefully using success flags — partial results are always saved rather than discarded.
+
+### Analysis Status
+
+| Status | Meaning |
+|--------|---------|
+| `pending` | Complaint created, analysis not yet triggered |
+| `processing` | Background task running — LangGraph pipeline in progress |
+| `completed` | All 4 nodes succeeded |
+| `partial` | Extraction succeeded but classification or CAPA failed |
+| `failed` | Extraction failed — no structured data could be recovered |
+
+### Risk Classification
+
+Follows ICH Q10 and FDA 21 CFR Part 211 standards:
 
 | Risk Level | Definition |
 |-----------|-----------|
 | `critical` | Patient safety risk, potential recall, regulatory reportable |
 | `major` | Confirmed quality defect, packaging failure, spec deviation |
 | `minor` | Cosmetic defect, administrative error, no quality impact |
-| `unknown` | Not yet assessed |
+| `unknown` | Insufficient information to assess |
 
 ---
 
 ## Backend Overview
 
-The backend provides REST APIs for:
+### Analysis Flow
 
-- Creating and managing customer complaints
-- Uploading complaint documents (PDF, email, text)
-- Extracting complaint information using AI
-- Classifying complaint risk and category per ICH Q10
-- Checking complaint completeness per FDA 21 CFR 211.198
-- Generating root cause analysis using 5-Why methodology
-- Generating CAPA recommendations (corrective + preventive)
-- Generating complaint executive summaries
-- Detecting similar or duplicate complaints
-- Returning complaint data and AI analysis to the frontend
+Analysis is non-blocking. The flow is:
+
+```
+POST /analysis/analyze
+    → returns immediately with analysis_status: "processing"
+    → background task starts LangGraph pipeline
+    → pipeline runs 4 LLM calls sequentially
+    → results saved to database
+    → analysis_status updated to "completed" / "partial" / "failed"
+
+GET /analysis/{complaint_id}
+    → frontend polls this endpoint
+    → returns current status + results when ready
+```
 
 ### Database Tables
 
 | Table | Purpose |
 |-------|---------|
-| `complaints` | Core complaint record — all structured fields |
+| `complaints` | Core complaint record — all structured fields + analysis_status |
 | `analysis_results` | Everything the AI agent produced (1-to-1 with complaints) |
 | `capa_actions` | Individual CAPA action items (many per complaint) |
 | `attachments` | Uploaded file metadata + extracted text |
+
+### List Endpoint Filters
+
+`GET /complaints` supports:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `status` | enum | Filter by complaint status |
+| `risk_level` | enum | Filter by risk level |
+| `category` | enum | Filter by complaint category |
+| `ai_processed` | bool | Filter by whether AI has analyzed |
+| `skip` | int | Pagination offset (default 0) |
+| `limit` | int | Page size (default 50, max 200) |
 
 ---
 
 ## Frontend Overview
 
-The frontend is a React 18 single-page application with a three-column layout:
+Three-column layout:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -215,36 +261,17 @@ The frontend is a React 18 single-page application with a three-column layout:
 └──────────────┴──────────────────────────┴───────────────┘
 ```
 
-### Key Components
+### Chat + Polling Workflow
 
-| Component | Purpose |
-|-----------|---------|
-| `ComplaintForm.jsx` | Three-column layout, chat interface, auto-fill logic |
-| `AICopilot.jsx` | Displays risk assessment, root cause, CAPA actions |
-| `ComplaintList.jsx` | Filterable table of all complaints with risk badges |
-| `Dashboard.jsx` | KPI cards — total, critical, major, AI analyzed counts |
-
-### Chat Workflow
-
-1. User types complaint text in the right chat panel and presses Enter
-2. Message appears as a blue bubble (right-aligned)
-3. AI responds with "Analyzing..." loading bubble
-4. Backend runs LangGraph agent — single OpenAI call
-5. Form fields auto-fill from AI extraction (product, batch, customer)
-6. AI Copilot panel populates with risk assessment, root cause, CAPA
-7. Chat shows completion message with risk level and summary
-
-### Redux State
-
-All complaint state is managed in Redux Toolkit:
-
-| Selector | State |
-|----------|-------|
-| `selectComplaints` | List of all complaints |
-| `selectSelectedComplaint` | Currently viewed complaint + analysis |
-| `selectAnalyzing` | True while LangGraph agent runs |
-| `selectFormLoading` | True while saving complaint |
-| `selectListLoading` | True while fetching list |
+1. User types complaint text in the right chat panel
+2. Frontend calls `POST /complaints` to create the complaint
+3. Frontend calls `POST /analysis/analyze` — returns immediately
+4. Frontend begins polling `GET /analysis/{id}` every 3 seconds
+5. While polling: form shows loading state, copilot shows spinner
+6. When `analysis_status === "completed"`:
+   - Form fields auto-fill from extracted data
+   - AI Copilot panel populates with risk, root cause, CAPA
+   - Chat shows completion message with summary
 
 ---
 
@@ -252,16 +279,16 @@ All complaint state is managed in Redux Toolkit:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/complaints/` | Create a new complaint |
-| `POST` | `/complaints/upload` | Upload PDF or email file |
-| `GET` | `/complaints/` | List all complaints (with filters) |
-| `GET` | `/complaints/{id}` | Get complaint + full AI analysis |
+| `POST` | `/complaints` | Create a new complaint |
+| `POST` | `/complaints/upload` | Upload PDF, TXT, or EML file |
+| `GET` | `/complaints` | List complaints — supports filtering + pagination |
+| `GET` | `/complaints/{id}` | Get single complaint + full analysis |
 | `PATCH` | `/complaints/{id}` | Update complaint fields |
 | `DELETE` | `/complaints/{id}` | Delete a complaint |
-| `POST` | `/analysis/analyze` | Trigger LangGraph AI agent |
-| `GET` | `/analysis/{id}` | Get analysis result for a complaint |
+| `POST` | `/analysis/analyze` | Trigger AI pipeline (returns immediately) |
+| `GET` | `/analysis/{id}` | Poll for analysis status and results |
 | `GET` | `/` | Health check |
-| `GET` | `/docs` | Swagger UI — interactive API docs |
+| `GET` | `/docs` | Swagger UI |
 
 ---
 
@@ -290,7 +317,7 @@ GRANT ALL PRIVILEGES ON pharmadb.* TO 'pharmauser'@'localhost';
 FLUSH PRIVILEGES;
 ```
 
-### 3. Set up Backend
+### 3. Set up backend
 
 ```bash
 cd backend
@@ -308,29 +335,24 @@ cp .env.example .env
 # Edit .env and add your values
 ```
 
-### 4. Run Backend
+### 4. Run backend
 
 ```bash
 uvicorn main:app --reload --port 8000
 ```
 
-API docs available at: `http://localhost:8000/docs`
+API docs: `http://localhost:8000/docs`
 
-### 5. Set up Frontend
+### 5. Set up and run frontend
 
 ```bash
 cd frontend
 npm install
 cp .env.example .env
-```
-
-### 6. Run Frontend
-
-```bash
 npm run dev
 ```
 
-App available at: `http://localhost:3000`
+App: `http://localhost:3000`
 
 ---
 
@@ -339,14 +361,11 @@ App available at: `http://localhost:3000`
 ### Backend `.env`
 
 ```env
-# OpenAI
 OPENAI_API_KEY=sk-your-key-here
 OPENAI_MODEL=gpt-4o-mini
 
-# Database
 DATABASE_URL=mysql+pymysql://pharmauser:pharmapass@localhost:3306/pharmadb
 
-# App
 SECRET_KEY=your-secret-key-here
 DEBUG=True
 ```
@@ -361,7 +380,7 @@ VITE_API_URL=http://localhost:8000
 
 ## Sample Test Complaint
 
-Paste this into the chat input to test the full AI pipeline:
+Paste this into the chat input to test the full pipeline:
 
 ```
 From: dr.priya.sharma@citymedical.in
@@ -380,7 +399,7 @@ Phone: +91 22 4567 8901
 ```
 
 **Expected output:** MAJOR risk, Product Quality category, auto-filled form fields,
-root cause analysis, 4 CAPA actions, executive summary.
+root cause analysis, CAPA actions, executive summary.
 
 ---
 

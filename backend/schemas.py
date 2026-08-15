@@ -177,6 +177,7 @@ class ComplaintResponse(BaseModel):
 
     is_duplicate: bool
     ai_processed: bool
+    analysis_status: Optional[str] = None 
 
     analysis: Optional[AnalysisResultResponse] = None
     capa_actions: List[CapaActionResponse] = Field(
@@ -201,6 +202,7 @@ class ComplaintListItem(BaseModel):
     status: ComplaintStatusEnum
     risk_level: RiskLevelEnum
     ai_processed: bool
+    analysis_status: Optional[str] = None
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -215,6 +217,7 @@ class AnalyzeResponse(BaseModel):
     complaint_id: str
     success: bool
     message: str
+    analysis_status: str = Field(default="pending")
     analysis: Optional[AnalysisResultResponse] = None
     capa_actions: List[CapaActionResponse] = Field(
         default_factory=list

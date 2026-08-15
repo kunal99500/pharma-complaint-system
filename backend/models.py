@@ -122,6 +122,11 @@ class Complaint(Base):
         nullable=False,
         default=False,
     )
+    analysis_status = Column(
+    String(50),
+    nullable=True,
+    default="pending",
+)
 
     created_at = Column(
         DateTime,
